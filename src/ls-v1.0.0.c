@@ -1,10 +1,10 @@
 /*
-* Programming Assignment 02: ls-v1.1.0
-* Adds -l (long listing format) to the base version.
+* Programming Assignment 02: ls-v1.2.0
+* Adds default column display ("down then across") to v1.1.0.
 * Usage:
 *       $ ./bin/ls
 *       $ ./bin/ls -l
-*       $ ./bin/ls -l /home /etc
+*       $ ./bin/ls /home /etc
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,17 +13,23 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <pwd.h>
 #include <grp.h>
 #include <time.h>
 
 extern int errno;
 
+#define COL_SPACING 2
+
 void do_ls(const char *dir, int long_flag);
+void display_columns(char **names, int count, int maxlen);
+void display_long(const char *dir, char **names, int count);
 void print_long(const char *dir, const char *name,
                 int w_nlink, int w_user, int w_group, int w_size);
 void mode_to_string(mode_t mode, char *str);
 int num_width(long n);
+int get_terminal_width(void);
 
 int main(int argc, char *argv[])
 {
@@ -59,6 +65,16 @@ int main(int argc, char *argv[])
     return 0;
 }
 
+/* Returns the terminal width in characters; falls back to 80 */
+int get_terminal_width(void)
+{
+    struct winsize ws;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0)
+        return 80;
+    return ws.ws_col;
+}
+
+/* Reads all names of directory "dir" into a dynamic array, then displays */
 void do_ls(const char *dir, int long_flag)
 {
     struct dirent *entry;
@@ -69,67 +85,136 @@ void do_ls(const char *dir, int long_flag)
         return;
     }
 
-    int w_nlink = 0, w_user = 0, w_group = 0, w_size = 0;
+    char **names = NULL;
+    int count = 0;
+    int capacity = 0;
+    int maxlen = 0;
 
-    /* PASS 1 (only for -l): measure column widths and total blocks */
-    if (long_flag)
-    {
-        long total = 0;
-        while ((entry = readdir(dp)) != NULL)
-        {
-            if (entry->d_name[0] == '.')
-                continue;
-
-            char path[4096];
-            snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
-
-            struct stat st;
-            if (lstat(path, &st) == -1)
-                continue;
-
-            total += st.st_blocks;
-
-            int w = num_width((long)st.st_nlink);
-            if (w > w_nlink)
-                w_nlink = w;
-
-            struct passwd *pw = getpwuid(st.st_uid);
-            int lu = pw ? (int)strlen(pw->pw_name) : 1;
-            if (lu > w_user)
-                w_user = lu;
-
-            struct group *gr = getgrgid(st.st_gid);
-            int lg = gr ? (int)strlen(gr->gr_name) : 1;
-            if (lg > w_group)
-                w_group = lg;
-
-            w = num_width((long)st.st_size);
-            if (w > w_size)
-                w_size = w;
-        }
-        /* st_blocks counts 512-byte units; ls shows 1K units */
-        printf("total %ld\n", total / 2);
-        rewinddir(dp); /* go back to the start for pass 2 */
-    }
-
-    /* PASS 2: print */
     errno = 0;
     while ((entry = readdir(dp)) != NULL)
     {
         if (entry->d_name[0] == '.')
             continue;
-        if (long_flag)
-            print_long(dir, entry->d_name, w_nlink, w_user, w_group, w_size);
-        else
-            printf("%s\n", entry->d_name);
+
+        /* grow the array when it is full (doubling strategy) */
+        if (count == capacity)
+        {
+            capacity = (capacity == 0) ? 16 : capacity * 2;
+            char **tmp = realloc(names, capacity * sizeof(char *));
+            if (tmp == NULL)
+            {
+                perror("realloc failed");
+                break;
+            }
+            names = tmp;
+        }
+
+        names[count] = strdup(entry->d_name);
+        if (names[count] == NULL)
+        {
+            perror("strdup failed");
+            break;
+        }
+
+        int len = (int)strlen(entry->d_name);
+        if (len > maxlen)
+            maxlen = len;
+        count++;
     }
 
     if (errno != 0)
     {
         perror("readdir failed");
     }
-
     closedir(dp);
+
+    if (long_flag)
+        display_long(dir, names, count);
+    else
+        display_columns(names, count, maxlen);
+
+    /* free every string, then the array itself */
+    for (int i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
+}
+
+/* Prints names in columns, "down then across" */
+void display_columns(char **names, int count, int maxlen)
+{
+    if (count == 0)
+        return;
+
+    int term_width = get_terminal_width();
+    int col_width = maxlen + COL_SPACING;
+
+    int cols = term_width / col_width;
+    if (cols < 1)
+        cols = 1;
+    if (cols > count)
+        cols = count;
+
+    int rows = (count + cols - 1) / cols; /* ceiling of count / cols */
+
+    for (int r = 0; r < rows; r++)
+    {
+        for (int c = 0; c < cols; c++)
+        {
+            int idx = c * rows + r; /* down the column first */
+            if (idx >= count)
+                break;
+
+            int next = (c + 1) * rows + r; /* is there an item after this one? */
+            if (c + 1 < cols && next < count)
+                printf("%-*s", col_width, names[idx]); /* padded */
+            else
+                printf("%s", names[idx]); /* last in row: no trailing spaces */
+        }
+        printf("\n");
+    }
+}
+
+/* Long listing: pass 1 measures widths and total, pass 2 prints */
+void display_long(const char *dir, char **names, int count)
+{
+    int w_nlink = 0, w_user = 0, w_group = 0, w_size = 0;
+    long total = 0;
+
+    for (int i = 0; i < count; i++)
+    {
+        char path[4096];
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+
+        struct stat st;
+        if (lstat(path, &st) == -1)
+            continue;
+
+        total += st.st_blocks;
+
+        int w = num_width((long)st.st_nlink);
+        if (w > w_nlink)
+            w_nlink = w;
+
+        struct passwd *pw = getpwuid(st.st_uid);
+        int lu = pw ? (int)strlen(pw->pw_name) : 1;
+        if (lu > w_user)
+            w_user = lu;
+
+        struct group *gr = getgrgid(st.st_gid);
+        int lg = gr ? (int)strlen(gr->gr_name) : 1;
+        if (lg > w_group)
+            w_group = lg;
+
+        w = num_width((long)st.st_size);
+        if (w > w_size)
+            w_size = w;
+    }
+
+    /* st_blocks counts 512-byte units; ls shows 1K units */
+    printf("total %ld\n", total / 2);
+
+    for (int i = 0; i < count; i++)
+        print_long(dir, names[i], w_nlink, w_user, w_group, w_size);
 }
 
 /* Returns how many digits a number has */
