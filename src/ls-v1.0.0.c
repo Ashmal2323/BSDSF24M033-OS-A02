@@ -1,6 +1,6 @@
 /*
-* Programming Assignment 02: ls-v1.3.0
-* Adds -x (horizontal "across" display) to v1.2.0.
+* Programming Assignment 02: ls-v1.4.0
+* Adds alphabetical sorting (qsort) to v1.3.0.
 * Usage:
 *       $ ./bin/ls
 *       $ ./bin/ls -l
@@ -32,6 +32,7 @@ enum display_mode
 };
 
 void do_ls(const char *dir, int mode);
+int compare_names(const void *a, const void *b);
 void display_columns(char **names, int count, int maxlen);
 void display_horizontal(char **names, int count, int maxlen);
 void display_long(const char *dir, char **names, int count);
@@ -87,7 +88,19 @@ int get_terminal_width(void)
     return ws.ws_col;
 }
 
-/* Reads all names of directory "dir" into a dynamic array, then displays */
+/*
+ * Comparison function for qsort().
+ * qsort passes POINTERS TO ELEMENTS. Our elements are char *, so each
+ * argument is really a char **. We cast, dereference, and use strcmp.
+ */
+int compare_names(const void *a, const void *b)
+{
+    const char *s1 = *(const char *const *)a;
+    const char *s2 = *(const char *const *)b;
+    return strcmp(s1, s2);
+}
+
+/* Reads all names of directory "dir" into a dynamic array, sorts, displays */
 void do_ls(const char *dir, int mode)
 {
     struct dirent *entry;
@@ -140,6 +153,10 @@ void do_ls(const char *dir, int mode)
         perror("readdir failed");
     }
     closedir(dp);
+
+    /* Sort alphabetically, after reading everything and before displaying */
+    if (count > 1)
+        qsort(names, count, sizeof(char *), compare_names);
 
     /* Choose the display function based on the mode flag */
     if (mode == MODE_LONG)
