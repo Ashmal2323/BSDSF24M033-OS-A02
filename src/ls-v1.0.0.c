@@ -1,6 +1,6 @@
 /*
-* Programming Assignment 02: ls-v1.4.0
-* Adds alphabetical sorting (qsort) to v1.3.0.
+* Programming Assignment 02: ls-v1.5.0
+* Adds colorized output based on file type to v1.4.0.
 * Usage:
 *       $ ./bin/ls
 *       $ ./bin/ls -l
@@ -23,6 +23,14 @@ extern int errno;
 
 #define COL_SPACING 2
 
+/* ANSI escape codes for colors */
+#define COLOR_RESET   "\033[0m"
+#define COLOR_BLUE    "\033[0;34m"
+#define COLOR_GREEN   "\033[0;32m"
+#define COLOR_RED     "\033[0;31m"
+#define COLOR_PINK    "\033[0;35m"
+#define COLOR_REVERSE "\033[7m"
+
 /* The three display modes. Only one is active at a time. */
 enum display_mode
 {
@@ -33,14 +41,16 @@ enum display_mode
 
 void do_ls(const char *dir, int mode);
 int compare_names(const void *a, const void *b);
-void display_columns(char **names, int count, int maxlen);
-void display_horizontal(char **names, int count, int maxlen);
+void display_columns(const char *dir, char **names, int count, int maxlen);
+void display_horizontal(const char *dir, char **names, int count, int maxlen);
 void display_long(const char *dir, char **names, int count);
 void print_long(const char *dir, const char *name,
                 int w_nlink, int w_user, int w_group, int w_size);
+void print_colored(const char *dir, const char *name, int padding);
 void mode_to_string(mode_t mode, char *str);
 int num_width(long n);
 int get_terminal_width(void);
+int is_archive(const char *name);
 
 int main(int argc, char *argv[])
 {
@@ -88,16 +98,62 @@ int get_terminal_width(void)
     return ws.ws_col;
 }
 
-/*
- * Comparison function for qsort().
- * qsort passes POINTERS TO ELEMENTS. Our elements are char *, so each
- * argument is really a char **. We cast, dereference, and use strcmp.
- */
+/* Comparison function for qsort(): each argument is really a char ** */
 int compare_names(const void *a, const void *b)
 {
     const char *s1 = *(const char *const *)a;
     const char *s2 = *(const char *const *)b;
     return strcmp(s1, s2);
+}
+
+/* Returns 1 if the filename ends with .tar, .gz or .zip */
+int is_archive(const char *name)
+{
+    size_t len = strlen(name);
+    const char *exts[] = {".tar", ".gz", ".zip"};
+    for (int i = 0; i < 3; i++)
+    {
+        size_t elen = strlen(exts[i]);
+        if (len > elen && strcmp(name + len - elen, exts[i]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * Prints a filename in the color matching its type, then pads it with
+ * "padding" spaces. Padding is printed OUTSIDE the color codes, because
+ * escape codes take no screen space but would break %-*s width counting.
+ */
+void print_colored(const char *dir, const char *name, int padding)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+
+    const char *color = "";
+    struct stat st;
+    if (lstat(path, &st) == 0)
+    {
+        mode_t m = st.st_mode;
+        if (S_ISLNK(m))
+            color = COLOR_PINK;
+        else if (S_ISDIR(m))
+            color = COLOR_BLUE;
+        else if (S_ISCHR(m) || S_ISBLK(m) || S_ISSOCK(m) || S_ISFIFO(m))
+            color = COLOR_REVERSE;
+        else if (is_archive(name))
+            color = COLOR_RED;
+        else if (m & (S_IXUSR | S_IXGRP | S_IXOTH))
+            color = COLOR_GREEN;
+    }
+
+    if (color[0] != '\0')
+        printf("%s%s%s", color, name, COLOR_RESET);
+    else
+        printf("%s", name);
+
+    for (int i = 0; i < padding; i++)
+        putchar(' ');
 }
 
 /* Reads all names of directory "dir" into a dynamic array, sorts, displays */
@@ -162,9 +218,9 @@ void do_ls(const char *dir, int mode)
     if (mode == MODE_LONG)
         display_long(dir, names, count);
     else if (mode == MODE_HORIZONTAL)
-        display_horizontal(names, count, maxlen);
+        display_horizontal(dir, names, count, maxlen);
     else
-        display_columns(names, count, maxlen);
+        display_columns(dir, names, count, maxlen);
 
     /* free every string, then the array itself */
     for (int i = 0; i < count; i++)
@@ -173,7 +229,7 @@ void do_ls(const char *dir, int mode)
 }
 
 /* Prints names in columns, "down then across" */
-void display_columns(char **names, int count, int maxlen)
+void display_columns(const char *dir, char **names, int count, int maxlen)
 {
     if (count == 0)
         return;
@@ -198,17 +254,18 @@ void display_columns(char **names, int count, int maxlen)
                 break;
 
             int next = (c + 1) * rows + r; /* is there an item after this one? */
+            int len = (int)strlen(names[idx]);
             if (c + 1 < cols && next < count)
-                printf("%-*s", col_width, names[idx]); /* padded */
+                print_colored(dir, names[idx], col_width - len); /* padded */
             else
-                printf("%s", names[idx]); /* last in row: no trailing spaces */
+                print_colored(dir, names[idx], 0); /* last in row: no padding */
         }
         printf("\n");
     }
 }
 
 /* Prints names left to right, wrapping when the line is full ("-x") */
-void display_horizontal(char **names, int count, int maxlen)
+void display_horizontal(const char *dir, char **names, int count, int maxlen)
 {
     if (count == 0)
         return;
@@ -225,7 +282,8 @@ void display_horizontal(char **names, int count, int maxlen)
             printf("\n");
             pos = 0;
         }
-        printf("%-*s", col_width, names[i]);
+        int len = (int)strlen(names[i]);
+        print_colored(dir, names[i], col_width - len);
         pos += col_width;
     }
     printf("\n");
@@ -346,14 +404,16 @@ void print_long(const char *dir, const char *name,
     strncpy(timebuf, t + 4, 12);
     timebuf[12] = '\0';
 
-    printf("%s %*lu %-*s %-*s %*ld %s %s",
+    printf("%s %*lu %-*s %-*s %*ld %s ",
            perms,
            w_nlink, (unsigned long)st.st_nlink,
            w_user, pw ? pw->pw_name : "?",
            w_group, gr ? gr->gr_name : "?",
            w_size, (long)st.st_size,
-           timebuf,
-           name);
+           timebuf);
+
+    /* the filename is colored by file type */
+    print_colored(dir, name, 0);
 
     /* for symbolic links, also show where they point */
     if (S_ISLNK(st.st_mode))
