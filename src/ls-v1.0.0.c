@@ -1,10 +1,11 @@
 /*
-* Programming Assignment 02: ls-v1.2.0
-* Adds default column display ("down then across") to v1.1.0.
+* Programming Assignment 02: ls-v1.3.0
+* Adds -x (horizontal "across" display) to v1.2.0.
 * Usage:
 *       $ ./bin/ls
 *       $ ./bin/ls -l
-*       $ ./bin/ls /home /etc
+*       $ ./bin/ls -x
+*       $ ./bin/ls -x /home /etc
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,8 +23,17 @@ extern int errno;
 
 #define COL_SPACING 2
 
-void do_ls(const char *dir, int long_flag);
+/* The three display modes. Only one is active at a time. */
+enum display_mode
+{
+    MODE_DEFAULT = 0,    /* down then across */
+    MODE_LONG = 1,       /* -l */
+    MODE_HORIZONTAL = 2  /* -x */
+};
+
+void do_ls(const char *dir, int mode);
 void display_columns(char **names, int count, int maxlen);
+void display_horizontal(char **names, int count, int maxlen);
 void display_long(const char *dir, char **names, int count);
 void print_long(const char *dir, const char *name,
                 int w_nlink, int w_user, int w_group, int w_size);
@@ -33,32 +43,35 @@ int get_terminal_width(void);
 
 int main(int argc, char *argv[])
 {
-    int long_flag = 0;
+    int mode = MODE_DEFAULT;
     int opt;
 
-    while ((opt = getopt(argc, argv, "l")) != -1)
+    while ((opt = getopt(argc, argv, "lx")) != -1)
     {
         switch (opt)
         {
         case 'l':
-            long_flag = 1;
+            mode = MODE_LONG;
+            break;
+        case 'x':
+            mode = MODE_HORIZONTAL;
             break;
         default:
-            fprintf(stderr, "Usage: %s [-l] [dir...]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [-l | -x] [dir...]\n", argv[0]);
             exit(1);
         }
     }
 
     if (optind == argc)
     {
-        do_ls(".", long_flag);
+        do_ls(".", mode);
     }
     else
     {
         for (int i = optind; i < argc; i++)
         {
             printf("Directory listing of %s : \n", argv[i]);
-            do_ls(argv[i], long_flag);
+            do_ls(argv[i], mode);
             puts("");
         }
     }
@@ -75,7 +88,7 @@ int get_terminal_width(void)
 }
 
 /* Reads all names of directory "dir" into a dynamic array, then displays */
-void do_ls(const char *dir, int long_flag)
+void do_ls(const char *dir, int mode)
 {
     struct dirent *entry;
     DIR *dp = opendir(dir);
@@ -128,8 +141,11 @@ void do_ls(const char *dir, int long_flag)
     }
     closedir(dp);
 
-    if (long_flag)
+    /* Choose the display function based on the mode flag */
+    if (mode == MODE_LONG)
         display_long(dir, names, count);
+    else if (mode == MODE_HORIZONTAL)
+        display_horizontal(names, count, maxlen);
     else
         display_columns(names, count, maxlen);
 
@@ -172,6 +188,30 @@ void display_columns(char **names, int count, int maxlen)
         }
         printf("\n");
     }
+}
+
+/* Prints names left to right, wrapping when the line is full ("-x") */
+void display_horizontal(char **names, int count, int maxlen)
+{
+    if (count == 0)
+        return;
+
+    int term_width = get_terminal_width();
+    int col_width = maxlen + COL_SPACING;
+    int pos = 0; /* how many characters are already on the current line */
+
+    for (int i = 0; i < count; i++)
+    {
+        /* if this item would not fit on the current line, start a new one */
+        if (pos > 0 && pos + col_width > term_width)
+        {
+            printf("\n");
+            pos = 0;
+        }
+        printf("%-*s", col_width, names[i]);
+        pos += col_width;
+    }
+    printf("\n");
 }
 
 /* Long listing: pass 1 measures widths and total, pass 2 prints */
